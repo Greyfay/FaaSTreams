@@ -179,7 +179,11 @@ func HandleSubscriptionMessage(ctx context.Context, coordinators []*Coordinator,
 	var minCleanupBound time.Time
 	for _, c := range coordinators {
 		bound := c.CheckWindow(ctx, event)
-		if !bound.IsZero() && (minCleanupBound.IsZero() || bound.Before(minCleanupBound)) {
+		if bound.IsZero() {
+			minCleanupBound = time.Time{}
+			break
+		}
+		if minCleanupBound.IsZero() || bound.Before(minCleanupBound) {
 			minCleanupBound = bound
 		}
 	}

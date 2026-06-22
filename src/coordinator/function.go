@@ -49,7 +49,11 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	var minCleanupBound time.Time
 	for _, c := range coordinators {
 		bound := c.CheckWindow(r.Context(), event)
-		if !bound.IsZero() && (minCleanupBound.IsZero() || bound.Before(minCleanupBound)) {
+		if bound.IsZero() {
+			minCleanupBound = time.Time{}
+			break
+		}
+		if minCleanupBound.IsZero() || bound.Before(minCleanupBound) {
 			minCleanupBound = bound
 		}
 	}
