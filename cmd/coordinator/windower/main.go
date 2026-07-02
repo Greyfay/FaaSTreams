@@ -52,13 +52,14 @@ if lo[2] == nil then
     return {0, 0, 0, 0}
 end
 local minStr = lo[2]
-local toRemove = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', '(' .. minStr, 'WITHSCORES')
+local first = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', '(' .. minStr, 'WITHSCORES', 'LIMIT', 0, 1)
+local last = redis.call('ZREVRANGEBYSCORE', KEYS[2], '(' .. minStr, '-inf', 'WITHSCORES', 'LIMIT', 0, 1)
 local removed = redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', '(' .. minStr)
 local minRemovedScore = 0
 local maxRemovedScore = 0
-if #toRemove > 0 then
-    minRemovedScore = tonumber(toRemove[2])
-    maxRemovedScore = tonumber(toRemove[#toRemove])
+if #first > 0 then
+    minRemovedScore = tonumber(first[2])
+    maxRemovedScore = tonumber(last[2])
 end
 return {tonumber(minStr), removed, minRemovedScore, maxRemovedScore}
 `)
