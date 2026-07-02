@@ -18,6 +18,15 @@ func main() {
 	topicID := os.Getenv("PUBSUB_TOPIC_ID")
 	sourceName := os.Getenv("SOURCE_NAME")
 
+	var runtime time.Duration
+	if raw := os.Getenv("SIM_RUNTIME"); raw != "" {
+		var err error
+		runtime, err = time.ParseDuration(raw)
+		if err != nil {
+			log.Fatalf("[Sim] Invalid SIM_RUNTIME %q: %v", raw, err)
+		}
+	}
+
 	cfg := config.LoadConfig()
 
 	source, ok := cfg.Sources[sourceName]
@@ -67,6 +76,6 @@ func main() {
 	}
 
 	time.Sleep(5 * time.Second)
-	simulator := NewSimulator(topic, sourceName, source)
+	simulator := NewSimulator(topic, sourceName, source, runtime)
 	simulator.Run(ctx)
 }
