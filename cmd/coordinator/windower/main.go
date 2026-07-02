@@ -48,11 +48,18 @@ return 1
 var cleanupBelowMin = redis.NewScript(`
 local lo = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
 if lo[2] == nil then
-    return {0, 0}
+    return {0, 0, 0, 0}
 end
 local minStr = lo[2]
+local toRemove = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', '(' .. minStr, 'WITHSCORES')
 local removed = redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', '(' .. minStr)
-return {tonumber(minStr), removed}
+local minRemovedScore = 0
+local maxRemovedScore = 0
+if #toRemove > 0 then
+    minRemovedScore = tonumber(toRemove[2])
+    maxRemovedScore = tonumber(toRemove[#toRemove])
+end
+return {tonumber(minStr), removed, minRemovedScore, maxRemovedScore}
 `)
 
 func init() {
@@ -168,11 +175,21 @@ func (c *Coordinator) triggerWorker(windowStart, windowEnd time.Time, q config.Q
 func (c *Coordinator) recordCleanup(ctx context.Context, prefix string) {
 	specificDataKey := dataKey + ":" + prefix
 	specificWindowNextKey := windowNextKey + ":" + prefix
-	_, err := cleanupBelowMin.Run(ctx, c.rdb,
+	res, err := cleanupBelowMin.Run(ctx, c.rdb,
 		[]string{specificWindowNextKey, specificDataKey},
 	).Result()
 	if err != nil {
 		log.Printf("[Cleanup] failed: %v", err)
+		return
+	}
+	vals, ok := res.([]interface{})
+	if !ok || len(vals) != 4 {
+		return
+	}
+	minScore, removed, minRemoved, maxRemoved := vals[0].(int64), vals[1].(int64), vals[2].(int64), vals[3].(int64)
+	if removed > 0 {
+		log.Printf("[Cleanup] source=%s pruned %d event(s) below min_window_start=%d, removed_score_range=[%d,%d]",
+			prefix, removed, minScore, minRemoved, maxRemoved)
 	}
 }
 
@@ -235,6 +252,9 @@ func (c *Coordinator) createWindows(ctx context.Context, t time.Time, q config.Q
 						log.Printf("[Coordinator] trigger worker %s failed: %v", q.Name, err)
 					}
 				}(winStart, endSec)
+			} else {
+				log.Printf("[Coordinator] EMPTY window query=%s source=%s range=[%d,%d) at check_time=%d",
+					q.Name, prefix, winStart, endSec, tSec)
 			}
 			// tumbling: slideSecs == windowSec
 			endSec += slideSecs
