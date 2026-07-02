@@ -8,7 +8,7 @@ output "worker_url" {
   value       = module.worker.url
 }
 
-output "data_sink_url" {b
+output "data_sink_url" {
   description = "HTTP trigger URL for the data-sink function."
   value       = module.data_sink.url
 }
