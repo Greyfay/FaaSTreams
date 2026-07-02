@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/functions-framework-go/functions"
-	"github.com/mardentub/coordinator/config"
+	"github.com/mardentub/windower/config"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -22,7 +22,8 @@ const (
 	windowNextKey     = "window:next"
 	dataKey           = "data"
 	lockKey           = "lock"
-	sessionKey        = "sessionKey"
+	sessionKey        = "session"
+	activeKey         = "active"
 	lateBufferSeconds = 3
 )
 
@@ -48,11 +49,19 @@ return 1
 var cleanupBelowMin = redis.NewScript(`
 local lo = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
 if lo[2] == nil then
-    return {0, 0}
+    return {0, 0, 0, 0}
 end
 local minStr = lo[2]
+local first = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', '(' .. minStr, 'WITHSCORES', 'LIMIT', 0, 1)
+local last = redis.call('ZREVRANGEBYSCORE', KEYS[2], '(' .. minStr, '-inf', 'WITHSCORES', 'LIMIT', 0, 1)
 local removed = redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', '(' .. minStr)
-return {tonumber(minStr), removed}
+local minRemovedScore = 0
+local maxRemovedScore = 0
+if #first > 0 then
+    minRemovedScore = tonumber(first[2])
+    maxRemovedScore = tonumber(last[2])
+end
+return {tonumber(minStr), removed, minRemovedScore, maxRemovedScore}
 `)
 
 func init() {
@@ -168,11 +177,21 @@ func (c *Coordinator) triggerWorker(windowStart, windowEnd time.Time, q config.Q
 func (c *Coordinator) recordCleanup(ctx context.Context, prefix string) {
 	specificDataKey := dataKey + ":" + prefix
 	specificWindowNextKey := windowNextKey + ":" + prefix
-	_, err := cleanupBelowMin.Run(ctx, c.rdb,
+	res, err := cleanupBelowMin.Run(ctx, c.rdb,
 		[]string{specificWindowNextKey, specificDataKey},
 	).Result()
 	if err != nil {
 		log.Printf("[Cleanup] failed: %v", err)
+		return
+	}
+	vals, ok := res.([]interface{})
+	if !ok || len(vals) != 4 {
+		return
+	}
+	minScore, removed, minRemoved, maxRemoved := vals[0].(int64), vals[1].(int64), vals[2].(int64), vals[3].(int64)
+	if removed > 0 {
+		log.Printf("[Cleanup] source=%s pruned %d event(s) below min_window_start=%d, removed_score_range=[%d,%d]",
+			prefix, removed, minScore, minRemoved, maxRemoved)
 	}
 }
 
@@ -235,6 +254,9 @@ func (c *Coordinator) createWindows(ctx context.Context, t time.Time, q config.Q
 						log.Printf("[Coordinator] trigger worker %s failed: %v", q.Name, err)
 					}
 				}(winStart, endSec)
+			} else {
+				log.Printf("[Coordinator] EMPTY window query=%s source=%s range=[%d,%d) at check_time=%d",
+					q.Name, prefix, winStart, endSec, tSec)
 			}
 			// tumbling: slideSecs == windowSec
 			endSec += slideSecs
@@ -269,40 +291,41 @@ func (c *Coordinator) handleSession(ctx context.Context, t time.Time, q config.Q
 	prefix := q.DataSource
 	specificWindowNextKey := windowNextKey + ":" + prefix
 	specificSessionKey := sessionKey + ":" + prefix
+	specificActiveKey := activeKey + ":" + prefix
 	const sessionGapSeconds = 300
 	gapSec := int64(sessionGapSeconds)
 	nowSec := t.Unix()
 
-	keys, err := c.rdb.Keys(ctx, specificSessionKey+":*").Result()
+	ids, err := c.rdb.SMembers(ctx, specificActiveKey).Result()
 	if err != nil {
-		return fmt.Errorf("redis keys failed: %w", err)
+		return fmt.Errorf("redis smembers failed: %w", err)
 	}
 
-	for _, timesKey := range keys {
+	for _, id := range ids {
 
-		id := timesKey[len(specificSessionKey)+1:]
-
+		timesKey := specificSessionKey + ":" + id
 		lockKeySession := lockKey + ":" + prefix + ":" + q.Name + ":" + id
 		memberStart := q.Name + ":" + id + ":start"
-
-		scores, err := c.rdb.ZRangeWithScores(ctx, timesKey, 0, -1).Result()
-		if err != nil {
-			log.Printf("[Session] failed to get scores for id %s: %v", id, err)
-			continue
-		}
-
-		if len(scores) == 0 {
-			c.rdb.ZRem(ctx, specificWindowNextKey, memberStart)
-			continue
-		}
 
 		ok, _ := c.rdb.SetNX(ctx, lockKeySession, "locked", 2*time.Minute).Result()
 		if !ok {
 			continue
 		}
 
-		func(scores []redis.Z, currentID, currentTimesKey, currentLockKey, currentMemberStart string) {
+		func(currentID, currentTimesKey, currentLockKey, currentMemberStart string) {
 			defer c.rdb.Del(ctx, currentLockKey)
+
+			scores, err := c.rdb.ZRangeWithScores(ctx, currentTimesKey, 0, -1).Result()
+			if err != nil {
+				log.Printf("[Session] failed to get scores for id %s: %v", currentID, err)
+				return
+			}
+
+			if len(scores) == 0 {
+				c.rdb.ZRem(ctx, specificWindowNextKey, currentMemberStart)
+				c.rdb.SRem(ctx, specificActiveKey, currentID)
+				return
+			}
 
 			winStart := int64(scores[0].Score)
 			winEnd := int64(scores[0].Score)
@@ -337,6 +360,7 @@ func (c *Coordinator) handleSession(ctx context.Context, t time.Time, q config.Q
 
 				c.rdb.ZRemRangeByScore(ctx, currentTimesKey, "-inf", strconv.FormatInt(winEnd, 10))
 				c.rdb.ZRem(ctx, specificWindowNextKey, currentMemberStart)
+				c.rdb.SRem(ctx, specificActiveKey, currentID)
 				return
 			}
 
@@ -349,7 +373,7 @@ func (c *Coordinator) handleSession(ctx context.Context, t time.Time, q config.Q
 			}
 
 			c.rdb.ZRemRangeByScore(ctx, currentTimesKey, "-inf", "("+strconv.FormatInt(winStart, 10))
-		}(scores, id, timesKey, lockKeySession, memberStart)
+		}(id, timesKey, lockKeySession, memberStart)
 	}
 
 	return nil

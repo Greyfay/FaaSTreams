@@ -10,13 +10,14 @@ import (
 
 	"github.com/GoogleCloudPlatform/functions-framework-go/functions"
 	"github.com/cloudevents/sdk-go/v2/event"
-	"github.com/mardentub/coordinator/config"
+	"github.com/mardentub/ingestor/config"
 	"github.com/redis/go-redis/v9"
 )
 
 const (
 	dataKey    = "data"
-	sessionKey = "sessionKey"
+	sessionKey = "session"
+	activeKey  = "active"
 )
 
 var (
@@ -97,15 +98,23 @@ func ingestEvent(ctx context.Context, e event.Event) error {
 		return fmt.Errorf("redis zadd failed: %w", err)
 	}
 
-	/*	id := fmt.Sprintf("%v", fields[idField])
+	/*id, ok := fields[idField].(string)
+	if ok && id != "" {
 		tSec := t.Unix()
 		tStr := strconv.FormatInt(tSec, 10)
+
+		if err := rdb.SAdd(ctx, activeKey+":"+sourceName, id).Err(); err != nil {
+			return fmt.Errorf("redis sadd active failed: %w", err)
+		}
+
 		if err := rdb.ZAdd(ctx, sessionKey+":"+sourceName+":"+id, redis.Z{
 			Score:  float64(tSec),
 			Member: tStr,
 		}).Err(); err != nil {
 			return fmt.Errorf("redis zadd session-time failed: %w", err)
-		}*/
+		}
+	}
+	*/
 
 	return nil
 }

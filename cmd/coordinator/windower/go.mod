@@ -1,11 +1,9 @@
-module github.com/mardentub/coordinator
+module github.com/mardentub/windower
 
 go 1.26.3
 
 require (
-	cloud.google.com/go/storage v1.62.2
 	github.com/GoogleCloudPlatform/functions-framework-go v1.9.2
-	github.com/cloudevents/sdk-go/v2 v2.16.2
 	github.com/redis/go-redis/v9 v9.19.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -18,6 +16,7 @@ require (
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	cloud.google.com/go/iam v1.7.0 // indirect
 	cloud.google.com/go/monitoring v1.24.3 // indirect
+	cloud.google.com/go/storage v1.62.2 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.31.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric v0.55.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.55.0 // indirect
