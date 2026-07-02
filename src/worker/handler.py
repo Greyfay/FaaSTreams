@@ -45,7 +45,7 @@ def handler(request):
 
     try:
         print(f"{log_prefix} Fetching window from Redis...", flush=True)
-        records = fetch.fetch_window(window_start, window_end)
+        records = fetch.fetch_window(window_start, window_end, query_config["data_source"])
         print(f"{log_prefix} Loaded {len(records)} records.", flush=True)
         results = analytics.run(records, query_config["query"], source)
         print(f"{log_prefix} {len(results)} result(s): {results}", flush=True)
