@@ -1,4 +1,4 @@
-package windower
+package main
 
 import (
 	"bytes"
@@ -22,7 +22,8 @@ const (
 	windowNextKey     = "window:next"
 	dataKey           = "data"
 	lockKey           = "lock"
-	sessionKey        = "sessionKey"
+	sessionKey        = "session"
+	activeKey         = "active"
 	lateBufferSeconds = 3
 )
 
@@ -289,40 +290,41 @@ func (c *Coordinator) handleSession(ctx context.Context, t time.Time, q config.Q
 	prefix := q.DataSource
 	specificWindowNextKey := windowNextKey + ":" + prefix
 	specificSessionKey := sessionKey + ":" + prefix
+	specificActiveKey := activeKey + ":" + prefix
 	const sessionGapSeconds = 300
 	gapSec := int64(sessionGapSeconds)
 	nowSec := t.Unix()
 
-	keys, err := c.rdb.Keys(ctx, specificSessionKey+":*").Result()
+	ids, err := c.rdb.SMembers(ctx, specificActiveKey).Result()
 	if err != nil {
-		return fmt.Errorf("redis keys failed: %w", err)
+		return fmt.Errorf("redis smembers failed: %w", err)
 	}
 
-	for _, timesKey := range keys {
+	for _, id := range ids {
 
-		id := timesKey[len(specificSessionKey)+1:]
-
+		timesKey := specificSessionKey + ":" + id
 		lockKeySession := lockKey + ":" + prefix + ":" + q.Name + ":" + id
 		memberStart := q.Name + ":" + id + ":start"
-
-		scores, err := c.rdb.ZRangeWithScores(ctx, timesKey, 0, -1).Result()
-		if err != nil {
-			log.Printf("[Session] failed to get scores for id %s: %v", id, err)
-			continue
-		}
-
-		if len(scores) == 0 {
-			c.rdb.ZRem(ctx, specificWindowNextKey, memberStart)
-			continue
-		}
 
 		ok, _ := c.rdb.SetNX(ctx, lockKeySession, "locked", 2*time.Minute).Result()
 		if !ok {
 			continue
 		}
 
-		func(scores []redis.Z, currentID, currentTimesKey, currentLockKey, currentMemberStart string) {
+		func(currentID, currentTimesKey, currentLockKey, currentMemberStart string) {
 			defer c.rdb.Del(ctx, currentLockKey)
+
+			scores, err := c.rdb.ZRangeWithScores(ctx, currentTimesKey, 0, -1).Result()
+			if err != nil {
+				log.Printf("[Session] failed to get scores for id %s: %v", currentID, err)
+				return
+			}
+
+			if len(scores) == 0 {
+				c.rdb.ZRem(ctx, specificWindowNextKey, currentMemberStart)
+				c.rdb.SRem(ctx, specificActiveKey, currentID)
+				return
+			}
 
 			winStart := int64(scores[0].Score)
 			winEnd := int64(scores[0].Score)
@@ -357,6 +359,7 @@ func (c *Coordinator) handleSession(ctx context.Context, t time.Time, q config.Q
 
 				c.rdb.ZRemRangeByScore(ctx, currentTimesKey, "-inf", strconv.FormatInt(winEnd, 10))
 				c.rdb.ZRem(ctx, specificWindowNextKey, currentMemberStart)
+				c.rdb.SRem(ctx, specificActiveKey, currentID)
 				return
 			}
 
@@ -369,7 +372,7 @@ func (c *Coordinator) handleSession(ctx context.Context, t time.Time, q config.Q
 			}
 
 			c.rdb.ZRemRangeByScore(ctx, currentTimesKey, "-inf", "("+strconv.FormatInt(winStart, 10))
-		}(scores, id, timesKey, lockKeySession, memberStart)
+		}(id, timesKey, lockKeySession, memberStart)
 	}
 
 	return nil
