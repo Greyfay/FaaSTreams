@@ -1,0 +1,1 @@
+gcloud functions deploy windower-mat --gen2 --runtime go126 --region europe-west3 --memory 256Mi --source ../cmd/coordinator/windower --entry-point ProcessWindows --trigger-http --allow-unauthenticated --network default --subnet projects/faastreams/regions/europe-west3/subnetworks/default --env-vars-file ../env/gcloud-env-windower.yaml
