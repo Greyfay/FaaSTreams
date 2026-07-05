@@ -8,3 +8,4 @@ gsutil cp ./query-config.yaml gs://faastreams-config/query-config.yaml
 echo "Config updated, redeploying coordinator..."
 bash deploy-demo-coordinator.sh
 echo "Done"
+

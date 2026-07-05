@@ -5,9 +5,9 @@ set -e
 # Redis alone doesn't touch this — Eventarc's push subscription retries failed
 # deliveries with backoff instead of dropping them, so old test runs can leave
 # millions of stale messages queued up, silently polluting the next run.
-SUBSCRIPTION=$(gcloud pubsub subscriptions list --filter="topic:ais-mat" --format="value(name)" | head -1)
+SUBSCRIPTION=$(gcloud pubsub subscriptions list --filter="topic:ais-stream" --format="value(name)" | head -1)
 if [ -z "$SUBSCRIPTION" ]; then
-  echo "Could not find Pub/Sub subscription for topic ais-mat — skipping backlog purge"
+  echo "Could not find Pub/Sub subscription for topic ais-stream — skipping backlog purge"
 else
   echo "Purging Pub/Sub backlog on $SUBSCRIPTION..."
   gcloud pubsub subscriptions seek "$SUBSCRIPTION" --time="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
@@ -17,7 +17,7 @@ fi
 gcloud compute ssh redis-bastion --zone europe-west3-a --command "
   redis-cli -h 10.101.64.19 -p 6379 DEL \
     data:ais_data_v1 \
-    analytics-results-mat \
+    analytics-results \
     window:next:ais_data_v1 \
     lock:ais_data_v1:hazard_zones_proximity_alerts
 "
