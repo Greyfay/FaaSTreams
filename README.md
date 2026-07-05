@@ -66,21 +66,21 @@ docker compose -f docker/docker-compose.dev.yml down
 
 ## E2E Example - Google Cloud
 
-The pipeline runs as four independently deployed Cloud Functions (gen2): `ingestor` and `windower` (from `cmd/coordinator/`), `worker` and `data-sink` (from `src/`). Data flows `simulator → Pub/Sub → ingestor → Redis → windower → worker → data-sink`.
+The pipeline runs as four independently deployed Cloud Functions (gen2): `ingestor`, `windower`, `worker` and `data-sink`. Data flows `simulator → Pub/Sub → ingestor → Redis → windower → worker → data-sink`.
 
 See `scripts/deploy-ingestor.sh`, `scripts/deploy-windower.sh`, `scripts/deploy-worker.sh`, and `scripts/deploy-data-sink.sh` for the exact `gcloud functions deploy` invocations.
 
 ```bash
 # ingestor - triggered by messages on the Pub/Sub topic
 gcloud functions deploy ingestor --gen2 --runtime go126 --region europe-west3 \
-  --memory 2048Mi --cpu 2 --source cmd/coordinator/ingestor --entry-point IngestEvent \
+  --memory 2048Mi --cpu 2 --source src/ingestor --entry-point IngestEvent \
   --trigger-topic ais-stream --network default \
   --subnet projects/faastreams/regions/europe-west3/subnetworks/default \
   --env-vars-file env/gcloud-env-ingestor.yaml --max-instances 6 --concurrency 20
 
 # windower - HTTP-triggered, invoked to process pending windows
 gcloud functions deploy windower --gen2 --runtime go126 --region europe-west3 \
-  --memory 256Mi --source cmd/coordinator/windower --entry-point ProcessWindows \
+  --memory 256Mi --source src/windower --entry-point ProcessWindows \
   --trigger-http --allow-unauthenticated --network default \
   --subnet projects/faastreams/regions/europe-west3/subnetworks/default \
   --env-vars-file env/gcloud-env-windower.yaml
@@ -111,8 +111,8 @@ PUBSUB_PROJECT_ID=faastreams PUBSUB_TOPIC_ID=ais-stream CONFIG_BUCKET=faastreams
 
 | Component             | Key                                                                          | Source                                                                              |
 | --------------------- | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| ingestor writes       | `data:<source>`                                                              | `cmd/coordinator/ingestor/main.go` (`dataKey = "data"`)                             |
-| windower reads/writes | `data:<source>`, `window:next:<source>`, `lock:<source>:<query>`             | `cmd/coordinator/windower/main.go`                                                  |
+| ingestor writes       | `data:<source>`                                                              | `src/ingestor/main.go` (`dataKey = "data"`)                                         |
+| windower reads/writes | `data:<source>`, `window:next:<source>`, `lock:<source>:<query>`             | `src/windower/main.go`                                                              |
 | worker reads          | `data:<source>`                                                              | `src/worker/fetch.py` (`DATA_KEY_PREFIX` + `data_source` from the trigger payload)  |
 | data-sink writes      | `analytics-results` (fixed, not per-source — single combined results stream) | `src/data-sink/handler.py` (`REDIS_KEY` env var, defaults to `"analytics-results"`) |
 
