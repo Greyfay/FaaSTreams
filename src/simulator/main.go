@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/faastreams/coordinator/config"
+	"simulator/config"
 
 	"cloud.google.com/go/pubsub"
 )
