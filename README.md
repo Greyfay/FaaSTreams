@@ -10,11 +10,12 @@ In the final production architecture, live data will be pushed from external sou
 
 ## Worker
 
-FaaS worker that fetches a range of AIS records from Redis, loads them into DuckDB, and emits proximity warnings for vessels approaching defined hazard zones.
+FaaS worker (`src/worker`) that, given a time window and query from the windower, fetches the matching AIS records from Redis, loads them into DuckDB, runs the configured query, and emits proximity warnings for vessels approaching defined hazard zones.
 
 ### Setup
 
 ```bash
+cd src/worker
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -22,129 +23,97 @@ pip install -r requirements.txt
 
 ### Running
 
-Make sure the Redis mock stack is running first (see `docker/` in the repo root).
+The worker is an HTTP-triggered function (see `docker/worker/Dockerfile`); make sure Redis is reachable first (e.g. via `docker/docker-compose.dev.yml`, see below).
 
 ```bash
-python handler.py '{"start_index": 0, "end_index": 999}'
+functions-framework --target=handler --source=handler.py --port=8080
 ```
 
-`start_index` and `end_index` are inclusive and correspond to the `ais:<index>` keys in Redis.
+In production this endpoint is called by the windower, which POSTs a JSON body shaped like:
 
+```json
+{
+  "window_start": 1750000000,
+  "window_end": 1750000060,
+  "query_name": "hazard_zones_proximity_alerts",
+  "data_source": "ais_data_v1",
+  "columns": { "...": "..." },
+  "reference_tables": { "...": "..." },
+  "query": "SELECT ...",
+  "return_type": "spatial",
+  "is_alert": true,
+  "alert_format": "{mmsi} ({name}) — ..."
+}
+```
+
+`window_start`/`window_end` are Unix timestamps bounding the score range read from `data:<data_source>` in Redis (see Redis Key Layout below).
 
 ## E2E Example - local
+
 For a local demonstration run terminal command:
+
 ```bash
 docker compose -f docker/docker-compose.dev.yml up --build
 ```
+
 When using this setup, ensure that the data folder contains a .csv with its header (column names).
 
 To delete the setup run:
+
 ```bash
 docker compose -f docker/docker-compose.dev.yml down
 ```
 
 ## E2E Example - Google Cloud
-If coordinator is not deployed yet, deploy by running:
-```bash
-gcloud run deploy coordinator-sid     
-  --image europe-west3-docker.pkg.dev/faastreams/e2e-cloud-sid/coordinator     
-  --region europe-west3     
-  --min-instances=0     
-  --max-instances=10     
-  --set-env-vars RUN_MODE=http,
-  REDIS_HOST=<redis-ip-address>,
-  REDIS_PORT=<redis-port>,
-  WORKER_URL=<worker-url>,
-  PUBSUB_PROJECT_ID=<project-id>,
-  PUBSUB_TOPIC_ID=<topic-id>,
-  PUBSUB_SUBSCRIPTION_ID=<subscription-id>,
-  CONFIG_PATH=/app/config/test.yaml
-```
 
-Then run simulator (from simulator directory) script to publish mock data to Pub/Sub topic:
-```bash
-PUBSUB_PROJECT_ID=faastreams PUBSUB_TOPIC_ID=ais-stream CSV_PATH=../../data/ais.csv go run .
-```
+The pipeline runs as four independently deployed Cloud Functions (gen2): `ingestor` and `windower` (from `cmd/coordinator/`), `worker` and `data-sink` (from `src/`). Data flows `simulator → Pub/Sub → ingestor → Redis → windower → worker → data-sink`.
 
-## Phase 1: Worker Development Setup
-
-Currently, this repository contains the foundational infrastructure needed to begin developing the **worker side** of the application.
-
-Since the live external data ingestion queue is not yet integrated, we have set up a mock infrastructure to simulate the data stream. This allows us to start writing and testing the FaaS workers immediately.
-
-To enable this worker development, a Docker Compose stack is used to run a Redis instance pre-loaded with mock AIS (Automatic Identification System) vessel tracking data. On startup, a one-shot import container reads `data/ais.csv` (19,999 rows) and writes every record as a Redis hash, simulating the state of the database after data ingestion.
-
-### Stack
-
-| Service        | Role                                                                                                                                                                                                                                                  |
-| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `redis`        | Redis server with persistence disabled (`--save "" --appendonly no`) for in-memory-only, fast access. Exposes port `6379`.                                                                                                                            |
-| `redis-import` | Custom Python image (`docker/import/Dockerfile`) that reads `data/ais.csv` and imports each row as a hash under the key `ais:<index>` (e.g. `ais:0`, `ais:1`, …). Also sets `ais:total` to the total number of imported records. Runs once and exits. |
-
-### Starting the Mock Infrastructure
+See `scripts/deploy-ingestor.sh`, `scripts/deploy-windower.sh`, `scripts/deploy-worker.sh`, and `scripts/deploy-data-sink.sh` for the exact `gcloud functions deploy` invocations.
 
 ```bash
-# from the docker/ directory
-cd docker
+# ingestor - triggered by messages on the Pub/Sub topic
+gcloud functions deploy ingestor --gen2 --runtime go126 --region europe-west3 \
+  --memory 2048Mi --cpu 2 --source cmd/coordinator/ingestor --entry-point IngestEvent \
+  --trigger-topic ais-stream --network default \
+  --subnet projects/faastreams/regions/europe-west3/subnetworks/default \
+  --env-vars-file env/gcloud-env-ingestor.yaml --max-instances 6 --concurrency 20
 
-# start in detached mode — Redis starts first, import runs after Redis is healthy, then exits
-docker compose up -d
+# windower - HTTP-triggered, invoked to process pending windows
+gcloud functions deploy windower --gen2 --runtime go126 --region europe-west3 \
+  --memory 256Mi --source cmd/coordinator/windower --entry-point ProcessWindows \
+  --trigger-http --allow-unauthenticated --network default \
+  --subnet projects/faastreams/regions/europe-west3/subnetworks/default \
+  --env-vars-file env/gcloud-env-windower.yaml
 
-# stop and remove containers
-docker compose down
+# worker - HTTP-triggered by the windower, runs DuckDB queries over a Redis window
+gcloud functions deploy worker --gen2 --runtime python312 --region europe-west3 \
+  --memory 1024Mi --source src/worker --entry-point handler \
+  --trigger-http --allow-unauthenticated --network default \
+  --subnet projects/faastreams/regions/europe-west3/subnetworks/default \
+  --env-vars-file env/gcloud-env-worker.yaml --timeout 540
+
+# data-sink - HTTP-triggered by the worker, persists query results
+gcloud functions deploy data-sink --gen2 --runtime python312 --region europe-west3 \
+  --memory 256Mi --source src/data-sink --entry-point handler \
+  --trigger-http --allow-unauthenticated --network default \
+  --subnet projects/faastreams/regions/europe-west3/subnetworks/default \
+  --env-vars-file env/gcloud-env-data-sink.yaml
 ```
 
-_Note: The import container exits on its own once the mock data is loaded. Redis keeps running with the data in memory, ready for your local FaaS workers to interact with it._
-
-### Accessing Redis CLI
-
-You can interact with the mock data to test queries your workers will need to perform:
+Then run the simulator (from `src/simulator`) to publish mock AIS data to the Pub/Sub topic the ingestor is subscribed to:
 
 ```bash
-# open an interactive Redis CLI session inside the running container
-docker compose exec redis redis-cli
+PUBSUB_PROJECT_ID=faastreams PUBSUB_TOPIC_ID=ais-stream CONFIG_BUCKET=faastreams-config \
+  CONFIG_OBJECT=query-config.yaml SOURCE_NAME=ais_data_v1 go run .
 ```
 
-#### Useful commands
+## Redis Key Layout
 
-```text
-# total number of imported records
-GET ais:total
+| Component             | Key                                                                          | Source                                                                              |
+| --------------------- | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| ingestor writes       | `data:<source>`                                                              | `cmd/coordinator/ingestor/main.go` (`dataKey = "data"`)                             |
+| windower reads/writes | `data:<source>`, `window:next:<source>`, `lock:<source>:<query>`             | `cmd/coordinator/windower/main.go`                                                  |
+| worker reads          | `data:<source>`                                                              | `src/worker/fetch.py` (`DATA_KEY_PREFIX` + `data_source` from the trigger payload)  |
+| data-sink writes      | `analytics-results` (fixed, not per-source — single combined results stream) | `src/data-sink/handler.py` (`REDIS_KEY` env var, defaults to `"analytics-results"`) |
 
-# get all fields of a single record
-HGETALL ais:0
-
-# get a specific field from a record
-HGET ais:42 latitude
-
-# count keys
-DBSIZE
-```
-
-### Mock Data Fields
-
-Each `ais:<index>` hash contains the following fields, representing the payload FaaS workers will process:
-
-| Field                    | Description                          |
-| ------------------------ | ------------------------------------ |
-| `timestamp`              | UTC timestamp of the position report |
-| `mmsi`                   | Maritime Mobile Service Identity     |
-| `name`                   | Vessel name                          |
-| `shipType`               | Type of ship                         |
-| `latitude` / `longitude` | Position                             |
-| `sog`                    | Speed over ground (knots)            |
-| `cog`                    | Course over ground (degrees)         |
-| `heading`                | True heading (degrees)               |
-| `navigationalStatus`     | e.g. Under way, At anchor            |
-| `imo`                    | IMO number                           |
-| `callsign`               | Radio callsign                       |
-| `destination`            | Reported destination port            |
-| `eta`                    | Estimated time of arrival            |
-| `draught`                | Current draught (metres)             |
-| `length` / `width`       | Vessel dimensions (metres)           |
-| `cargoType`              | Cargo category                       |
-| `typeOfMobile`           | Class of AIS transponder             |
-| `positionFixingDevice`   | GPS, GLONASS, etc.                   |
-| `dataSourceType`         | AIS message source                   |
-| `rot`                    | Rate of turn                         |
-| `a` / `b` / `c` / `d`    | Antenna offset dimensions            |
+Note: `"data"` is defined as an independent literal in each of the three components above — nothing enforces that they agree beyond convention. A prior refactor changed the ingestor's key scheme without updating the worker's, silently breaking the pipeline (worker read from a dead key and always returned zero results) until the mismatch was found and fixed. Keep this in mind when changing key naming on any one side.
