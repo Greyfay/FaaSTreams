@@ -1,3 +1,5 @@
+// This file is duplicated verbatim in src/ingestor/config and src/simulator/config
+// (each is a separately deployed module, so it can't be a shared import). Keep all three in sync.
 package config
 
 import (
