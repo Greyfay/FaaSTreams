@@ -1,4 +1,4 @@
-package main
+package windower
 
 import (
 	"bytes"
