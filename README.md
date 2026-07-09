@@ -107,6 +107,22 @@ PUBSUB_PROJECT_ID=faastreams PUBSUB_TOPIC_ID=ais-stream CONFIG_BUCKET=faastreams
   CONFIG_OBJECT=query-config.yaml SOURCE_NAME=ais_data_v1 go run .
 ```
 
+## Query Config
+
+The query/source definitions (`query-config.yaml`) used by the simulator and worker are stored in GCS at `gs://faastreams-config/query-config.yaml`.
+
+To view its contents:
+
+```bash
+gsutil cat gs://faastreams-config/query-config.yaml
+```
+
+To download it locally:
+
+```bash
+gsutil cp gs://faastreams-config/query-config.yaml ./query-config.yaml
+```
+
 ## Redis Key Layout
 
 | Component             | Key                                                                          | Source                                                                              |
