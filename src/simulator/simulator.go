@@ -8,7 +8,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/faastreams/coordinator/config"
+	"simulator/config"
 
 	"cloud.google.com/go/pubsub"
 )
@@ -18,13 +18,15 @@ type Simulator struct {
 	topic      *pubsub.Topic
 	sourceName string
 	source     config.Source
+	runtime    time.Duration
 }
 
-func NewSimulator(topic *pubsub.Topic, sourceName string, source config.Source) *Simulator {
+func NewSimulator(topic *pubsub.Topic, sourceName string, source config.Source, runtime time.Duration) *Simulator {
 	return &Simulator{
 		topic:      topic,
 		sourceName: sourceName,
 		source:     source,
+		runtime:    runtime,
 	}
 }
 
@@ -49,14 +51,26 @@ func (s *Simulator) Run(ctx context.Context) {
 	}
 
 	simulationStartReal := time.Now()
-	var firstTimestampCSV time.Time
+	var firstTimestampCSV, lastTimestampCSV time.Time
 	var initialized bool
 	var publishedCount int
 
-	log.Printf("[Sim] Starting simulation, scaleFactor=%.1f", s.source.ScaleFactor)
+	var deadline time.Time
+	if s.runtime > 0 {
+		deadline = simulationStartReal.Add(s.runtime)
+		log.Printf("[Sim] Starting simulation, scaleFactor=%.1f, runtime=%s", s.source.ScaleFactor, s.runtime)
+	} else {
+		log.Printf("[Sim] Starting simulation, scaleFactor=%.1f", s.source.ScaleFactor)
+	}
 
 	lineCount := 0
 	for {
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			log.Printf("[Sim] Stopping: runtime budget (%s) reached. Published %d lines, simulated time covered %s -> %s (span %s)",
+				s.runtime, publishedCount, firstTimestampCSV.Format(s.source.TimestampFormat), lastTimestampCSV.Format(s.source.TimestampFormat), lastTimestampCSV.Sub(firstTimestampCSV))
+			break
+		}
+
 		row, err := reader.Read()
 		if err != nil {
 			if err.Error() == "EOF" {
@@ -83,6 +97,7 @@ func (s *Simulator) Run(ctx context.Context) {
 			firstTimestampCSV = currentTimeCSV
 			initialized = true
 		}
+		lastTimestampCSV = currentTimeCSV
 
 		elapsedTimeCSV := currentTimeCSV.Sub(firstTimestampCSV)
 		scaledElapsedTime := time.Duration(float64(elapsedTimeCSV) / s.source.ScaleFactor)
@@ -101,7 +116,7 @@ func (s *Simulator) Run(ctx context.Context) {
 			time.Sleep(waitTime)
 		}
 
-		record[s.source.TimestampField] = newTimestamp.Format(s.source.TimestampFormat)
+		record[s.source.TimestampField] = newTimestamp.UTC().Format(s.source.TimestampFormat)
 
 		record["_source"] = s.sourceName
 		messageBytes, err := json.Marshal(record)

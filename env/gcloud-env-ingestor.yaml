@@ -1,0 +1,3 @@
+REDIS_URL: 10.101.64.19:6379
+CONFIG_BUCKET: faastreams-config
+CONFIG_OBJECT: query-config.yaml
