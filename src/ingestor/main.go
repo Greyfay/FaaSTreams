@@ -58,8 +58,16 @@ func ingestEvent(ctx context.Context, e event.Event) error {
 		return fmt.Errorf("pubsub envelope parse error: %w", err)
 	}
 
+	return processMessage(ctx, pubSubMessage.Message.Data)
+}
+
+// processMessage parses a single event's raw published bytes and writes it to Redis.
+// Shared by the push (ingestEvent) and pull (ingestPull, pull.go) entry points.
+// A nil error with no Redis write means the message was malformed/unroutable and should
+// be dropped (acked), not retried; a non-nil error means a transient failure worth retrying.
+func processMessage(ctx context.Context, data []byte) error {
 	var fields map[string]interface{}
-	if err := json.Unmarshal(pubSubMessage.Message.Data, &fields); err != nil {
+	if err := json.Unmarshal(data, &fields); err != nil {
 		return fmt.Errorf("event schema error: %w", err)
 	}
 
@@ -93,7 +101,7 @@ func ingestEvent(ctx context.Context, e event.Event) error {
 
 	if err := rdb.ZAdd(ctx, dataKey+":"+sourceName, redis.Z{
 		Score:  float64(t.Unix()),
-		Member: string(pubSubMessage.Message.Data),
+		Member: string(data),
 	}).Err(); err != nil {
 		return fmt.Errorf("redis zadd failed: %w", err)
 	}
