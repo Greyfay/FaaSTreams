@@ -5,10 +5,10 @@ import json
 
 @functions_framework.http
 def windower_sub_1_trigger(request):
-    project_id = "faastreams"
-    project_region = "europe-west3"
-    queue_id = "faastreams-queue"
-    worker_url = "https://europe-west3-faastreams.cloudfunctions.net/windower"
+    project_id = os.getenv("GCP_PROJECT")
+    project_region = os.getenv("GCP_REGION")
+    queue_id = os.getenv("TASKS_QUEUE")
+    windower_url = os.getenv("WINDOWER_URL")
 
     client = tasks_v2.CloudTasksClient()
     queue_path = client.queue_path(project_id, project_region, queue_id)
