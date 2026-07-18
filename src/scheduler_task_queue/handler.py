@@ -15,6 +15,8 @@ def windower_sub_1_trigger(request):
 
     current_time = int(time.time())
 
+    # Schedule 12 tasks, each delayed by 5 seconds from the previous one
+    # Since  service is called every 60 seconds, this will cover the entire lifecycle
     for i in range(12):
         delay = i * 5
         execution_time = current_time + delay
