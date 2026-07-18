@@ -23,7 +23,7 @@ def windower_sub_1_trigger(request):
         task = {
             "http_request": {
                 "http_method": tasks_v2.HttpMethod.POST,
-                "url": worker_url,
+                "url": windower_url,
                 "headers": {"Content-Type": "application/json"},
                 "body": json.dumps({"step": i, "delay": delay}).encode("utf-8")
             },
