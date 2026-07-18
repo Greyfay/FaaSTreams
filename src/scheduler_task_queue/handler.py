@@ -34,9 +34,11 @@ def windower_sub_1_trigger(request):
                 "seconds": execution_time
             }
         }
-
-        client.create_task(request={"parent": queue_path, "task": task})
-        human_readable_time = time.ctime(execution_time)
-        print(f"[Scheduler Queue Tasks] Sent task {i} scheduled for {human_readable_time}")
+        try:
+            client.create_task(request={"parent": queue_path, "task": task})
+            human_readable_time = time.ctime(execution_time)
+            print(f"[Pinger] Sent task {i} scheduled for {human_readable_time}")
+        except Exception as e:
+            print(f"[Pinger] Failed to create task {i}: {e}")
 
     return "All tasks succesfully triggered", 200
