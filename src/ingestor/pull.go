@@ -2,7 +2,6 @@ package ingestor
 
 import (
 	"context"
-	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -14,10 +13,12 @@ import (
 )
 
 const (
-	pullLockKey     = "lock:ingestor:pull"
-	pullLockTTL     = 3 * time.Minute
-	drainTimeout    = 100 * time.Second
-	drainIdleWindow = 5 * time.Second
+	pullLockKey        = "lock:ingestor:pull"
+	pullLockTTL        = 7 * time.Second
+	drainIdleWindow    = 2000 * time.Millisecond
+	maxSessionDuration = 50 * time.Second
+	interval           = 5 * time.Second
+	maxDelay           = 1500 * time.Millisecond
 )
 
 var (
@@ -65,39 +66,130 @@ func ingestPull(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	defer rdb.Del(context.Background(), pullLockKey)
 
-	drainCtx, cancel := context.WithTimeout(ctx, drainTimeout)
-	defer cancel()
+	// CRITICAL: We only delete the lock here if the normal flow didn't release it yet
+	lockReleased := false
+	defer func() {
+		if !lockReleased {
+			rdb.Del(context.Background(), pullLockKey)
+		}
+	}()
 
-	var processed, failed int64
-	idle := time.AfterFunc(drainIdleWindow, cancel)
-	defer idle.Stop()
+	sessionCtx, cancelSession := context.WithTimeout(ctx, maxSessionDuration)
+	defer cancelSession()
 
-	err = pullSub.Receive(drainCtx, func(msgCtx context.Context, msg *pubsub.Message) {
-		idle.Reset(drainIdleWindow)
+	// `isShuttingDown` acts as a thread-safe coordination barrier (0 = active, 1 = stopping).
+	// It ensures the background ticker goroutine completely halts its triggers once the
+	// SubPub-Pulling terminates
+	var processedSinceLastTick, failedSinceLastTick, isShuttingDown int64
+
+	// to ensure that the last Windower trigger strictly adheres to the interval of `interval` (5s) seconds
+	var lastTickTime atomic.Value
+	lastTickTime.Store(time.Now())
+
+	// autonomous 5-second windower ticker
+	// internal ticker to guarantee that the Windower is triggered exactly
+	// every `interval` (5s) seconds from within this container, completely decoupling from the
+	// external scheduler as long as data is flowing.
+	windowerTicker := time.NewTicker(interval)
+	defer windowerTicker.Stop()
+
+	// triggering the windower every `interval` seconds,
+	// until the maximum session duration (`maxSessionDuration`) is reached.
+	go func() {
+		for {
+			select {
+			case <-windowerTicker.C:
+				if atomic.LoadInt64(&isShuttingDown) == 1 {
+					return
+				}
+
+				lastTickTime.Store(time.Now())
+
+				rdb.Expire(sessionCtx, pullLockKey, pullLockTTL)
+
+				currentProcessed := atomic.SwapInt64(&processedSinceLastTick, 0)
+				currentFailed := atomic.SwapInt64(&failedSinceLastTick, 0)
+
+				if currentFailed > 0 {
+					log.Printf("[PullIngestor] %d messages failed", currentFailed)
+				}
+
+				// There could be cases where a window is 2xinterval (10s) long,
+				//in which case the last `interval` (5s) are not sufficient to determine whether the window should be triggered
+				log.Printf("[PullIngestor] processed %d messages", currentProcessed)
+				triggerWindower()
+
+			case <-sessionCtx.Done():
+				return
+			}
+		}
+	}()
+
+	// Idle Guardian
+	// creates a child context for message pulling.
+	// If the queue goes empty and no messages arrive within `drainIdleWindow`,
+	// it triggers a background Goroutine to call cancelReceive().
+	// This breaks pullSub.Receive immediately
+	receiveCtx, cancelReceive := context.WithCancel(sessionCtx)
+	idleTimer := time.AfterFunc(drainIdleWindow, func() {
+		log.Printf("[PullIngestor] %v of absolute silence (queue empty). Terminating", drainIdleWindow)
+		cancelReceive()
+	})
+
+	log.Printf("[PullIngestor] starting continuous message consumption with internal %v ticker", interval)
+
+	err = pullSub.Receive(receiveCtx, func(msgCtx context.Context, msg *pubsub.Message) {
+		idleTimer.Reset(drainIdleWindow)
 
 		if procErr := processMessage(msgCtx, msg.Data); procErr != nil {
 			log.Printf("[PullIngestor] nacking message: %v", procErr)
 			msg.Nack()
-			atomic.AddInt64(&failed, 1)
+			atomic.AddInt64(&failedSinceLastTick, 1)
 			return
 		}
 		msg.Ack()
-		atomic.AddInt64(&processed, 1)
+		atomic.AddInt64(&processedSinceLastTick, 1)
 	})
-	if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
-		http.Error(w, "drain failed", http.StatusInternalServerError)
-		log.Printf("[PullIngestor] drain failed: %v", err)
+
+	atomic.StoreInt64(&isShuttingDown, 1)
+
+	idleTimer.Stop()
+	cancelReceive()
+
+	// Release the Redis lock early. Since the PubSub-Pulling
+	// has already terminated, this instance will not fetch any more data.
+	// Releasing `pullLockKey` now allows the next scheduled container instance
+	// to start working immediately without blockages.
+	// We explicitly set `lockReleased = true`. This prevents the
+	// top-level `defer` function from executing a second `rdb.Del`.
+	rdb.Del(context.Background(), pullLockKey)
+	lockReleased = true
+
+	lastTick := lastTickTime.Load().(time.Time)
+	timeSinceLastTick := time.Since(lastTick)
+
+	// ensures that the Windower is triggered every `interval`
+	if timeSinceLastTick < interval {
+		remainingWait := interval - timeSinceLastTick
+		log.Printf("[PullIngestor] Strict 5s pacing enforced. Sleeping for %v", remainingWait)
+		time.Sleep(remainingWait)
+	}
+
+	absoluteDeadline := lastTick.Add(interval).Add(maxDelay)
+
+	// If this goroutine suffered from a massive delay
+	// the next container instance might already be active and triggering Windowers.
+	// Therefore, this final window trigger is dropped to prevent duplicates.
+	if time.Now().After(absoluteDeadline) {
+		log.Printf("[PullIngestor] WARNING: Slept too long! Expected total ~%v, but actually passed %v. Dropping final trigger to prevent duplicate window.", interval, time.Since(lastTick))
+		w.WriteHeader(http.StatusOK)
 		return
 	}
 
-	log.Printf("[PullIngestor] tick complete: processed=%d failed=%d", processed, failed)
+	finalProcessed := atomic.SwapInt64(&processedSinceLastTick, 0)
 
-	// Cloud Run freezes the container once the HTTP response is sent, so this must complete
-	// before we respond rather than being kicked off as a background goroutine. Fire-and-forget
-	// here means the windower call's outcome doesn't gate this tick's success/lock, not that we
-	// return before it's actually been dispatched.
+	log.Printf("[PullIngestor] processed %d messages", finalProcessed)
 	triggerWindower()
 
 	w.WriteHeader(http.StatusOK)
