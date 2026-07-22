@@ -79,14 +79,6 @@ type writeBatcher struct {
 	done      chan struct{}
 	processed *int64
 	failed    *int64
-
-	// Diagnostics: cumulative flush count/latency/items, so ingestPull can
-	// log aggregated per-flush timing periodically instead of once per
-	// flush (which at high flush rates would be its own logging overhead).
-	flushCount    int64
-	flushItemsSum int64
-	flushNanosSum int64
-	flushNanosMax int64
 }
 
 func newWriteBatcher(processed, failed *int64) *writeBatcher {
@@ -102,33 +94,6 @@ func newWriteBatcher(processed, failed *int64) *writeBatcher {
 
 func (b *writeBatcher) add(item batchItem) {
 	b.items <- item
-}
-
-func (b *writeBatcher) recordFlush(items int, elapsed time.Duration) {
-	atomic.AddInt64(&b.flushCount, 1)
-	atomic.AddInt64(&b.flushItemsSum, int64(items))
-	atomic.AddInt64(&b.flushNanosSum, int64(elapsed))
-	for {
-		cur := atomic.LoadInt64(&b.flushNanosMax)
-		if int64(elapsed) <= cur || atomic.CompareAndSwapInt64(&b.flushNanosMax, cur, int64(elapsed)) {
-			break
-		}
-	}
-}
-
-// logStats reports cumulative flush diagnostics: how many flushes have run,
-// the average and worst-case Exec latency, and the average batch size
-// actually achieved (as opposed to pipelineBatchSize, the cap).
-func (b *writeBatcher) logStats() {
-	count := atomic.LoadInt64(&b.flushCount)
-	if count == 0 {
-		return
-	}
-	itemsSum := atomic.LoadInt64(&b.flushItemsSum)
-	nanosSum := atomic.LoadInt64(&b.flushNanosSum)
-	nanosMax := atomic.LoadInt64(&b.flushNanosMax)
-	log.Printf("[PullIngestor] flush stats: count=%d avg_items=%.1f avg_exec=%s max_exec=%s",
-		count, float64(itemsSum)/float64(count), time.Duration(nanosSum/count), time.Duration(nanosMax))
 }
 
 // close stops accepting new items, flushes whatever's buffered, and waits
@@ -200,13 +165,10 @@ func (b *writeBatcher) flush(batch []batchItem) {
 		}
 		cmds[key] = pipe.ZAdd(ctx, key, members...)
 	}
-	execStart := time.Now()
 	_, err := pipe.Exec(ctx)
-	execElapsed := time.Since(execStart)
 	if err != nil && !errors.Is(err, redis.Nil) {
-		log.Printf("[PullIngestor] pipeline exec error (batch=%d groups=%d elapsed=%s): %v", len(batch), len(groups), execElapsed, err)
+		log.Printf("[PullIngestor] pipeline exec error (batch=%d groups=%d): %v", len(batch), len(groups), err)
 	}
-	b.recordFlush(len(batch), execElapsed)
 
 	for key, items := range groups {
 		err := cmds[key].Err()
@@ -324,7 +286,6 @@ func ingestPull(w http.ResponseWriter, r *http.Request) {
 				// There could be cases where a window is 2xinterval (10s) long,
 				//in which case the last `interval` (5s) are not sufficient to determine whether the window should be triggered
 				log.Printf("[PullIngestor] processed %d messages", currentProcessed)
-				batcher.logStats()
 				triggerWindower()
 
 			case <-sessionCtx.Done():
@@ -332,28 +293,6 @@ func ingestPull(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}()
-
-	// Diagnostic: log the Redis connection pool's actual concurrency during
-	// the session, to see whether PoolSize:50 is really achieving many
-	// concurrent connections inside this environment, or whether something
-	// (e.g. Direct VPC egress connection setup) is keeping it much lower
-	// than what redis-benchmark achieved from the bastion.
-	statsDone := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				s := rdb.PoolStats()
-				log.Printf("[PullIngestor] redis pool: total=%d idle=%d stale=%d hits=%d misses=%d timeouts=%d",
-					s.TotalConns, s.IdleConns, s.StaleConns, s.Hits, s.Misses, s.Timeouts)
-			case <-statsDone:
-				return
-			}
-		}
-	}()
-	defer close(statsDone)
 
 	// Idle Guardian
 	// creates a child context for message pulling.
