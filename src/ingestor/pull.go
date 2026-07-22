@@ -22,37 +22,19 @@ const (
 	interval           = 5 * time.Second
 	maxDelay           = 1500 * time.Millisecond
 
-	// pullMaxOutstandingMessages raises Pub/Sub's own flow-control ceiling
-	// (client default: 1000 concurrently delivered-but-unacked messages)
-	// well above what this ingestor can hold received-but-not-yet-acked at
-	// once (pipelineChannelBuffer plus one batch in flight). Acks only
-	// happen when a batch flushes, not per message — measured flush stats
-	// showed exec itself is fast (~3-10ms), but without raising this, the
-	// batching delay alone trips Pub/Sub's flow control and throttles
-	// delivery, independent of how fast Redis or the flush loop actually is.
+	// how many messages can be outstanding at once — meaning delivered by the server to this client but not yet acked
 	pullMaxOutstandingMessages = 20000
 
-	// pullNumGoroutines sets how many concurrent StreamingPull streams the
-	// client opens (default is 1). Measured single-stream delivery tops out
-	// around 6-9k msgs/sec (see pullbench), while Redis and CPU both have
-	// large unused headroom at that rate — so more streams should raise the
-	// arrival ceiling without the flush side becoming the bottleneck.
+	// number of independent StreamingPull streams the client opens to the subscription
 	pullNumGoroutines = 4
 
-	// pipelineBatchSize caps how many ZADDs accumulate before being flushed
-	// as a single Redis pipeline. A single accumulate/flush loop is enough:
-	// measured pipeline execs took ~3-10ms, so one loop can push far more
-	// throughput than this pipeline needs without concurrent flushers.
+	// Max ZADDs accumulated before a batch is flushed as one Redis pipeline.
 	pipelineBatchSize = 500
 
-	// pipelineChannelBuffer decouples Receive's many concurrent callback
-	// goroutines from the single flush loop, so add() doesn't block callers
-	// under normal load.
+	// Buffer size of the channel feeding the flush loop, so add() doesn't block under normal load.
 	pipelineChannelBuffer = 2000
 
-	// pipelineFlushInterval bounds how long a partial batch can sit before
-	// being flushed anyway, so a quiet tail of messages doesn't wait for a
-	// full batch that will never come.
+	// Max time a partial batch waits before being flushed anyway.
 	pipelineFlushInterval = 100 * time.Millisecond
 )
 
@@ -284,7 +266,7 @@ func ingestPull(w http.ResponseWriter, r *http.Request) {
 				}
 
 				// There could be cases where a window is 2xinterval (10s) long,
-				//in which case the last `interval` (5s) are not sufficient to determine whether the window should be triggered
+				// in which case the last `interval` (5s) are not sufficient to determine whether the window should be triggered
 				log.Printf("[PullIngestor] processed %d messages", currentProcessed)
 				triggerWindower()
 
