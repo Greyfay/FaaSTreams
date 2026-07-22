@@ -30,6 +30,13 @@ const (
 	// delivery, independent of how fast Redis or the flush loop actually is.
 	pullMaxOutstandingMessages = 20000
 
+	// pullNumGoroutines sets how many concurrent StreamingPull streams the
+	// client opens (default is 1). Measured single-stream delivery tops out
+	// around 6-9k msgs/sec (see pullbench), while Redis and CPU both have
+	// large unused headroom at that rate — so more streams should raise the
+	// arrival ceiling without the flush side becoming the bottleneck.
+	pullNumGoroutines = 4
+
 	// pipelineBatchSize caps how many ZADDs accumulate before being flushed
 	// as a single Redis pipeline. A single accumulate/flush loop is enough:
 	// measured pipeline execs took ~3-10ms, so one loop can push far more
@@ -234,6 +241,7 @@ func init() {
 	}
 	pullSub = client.Subscriber(subID)
 	pullSub.ReceiveSettings.MaxOutstandingMessages = pullMaxOutstandingMessages
+	pullSub.ReceiveSettings.NumGoroutines = pullNumGoroutines
 
 	functions.HTTP("IngestPull", ingestPull)
 }
